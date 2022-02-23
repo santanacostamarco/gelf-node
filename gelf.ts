@@ -1,10 +1,17 @@
-'use strict'
+import { deflate } from 'zlib'
+import dgram from 'dgram'
+import EventEmitter from 'events'
+import os from 'os'
+import async from 'async'
 
-const deflate = require('zlib').deflate
-const dgram = require('dgram')
-const EventEmitter = require('events')
-const os = require('os')
-const async = require('async')
+type GelfOptions = {
+  graylogPort?: number,
+  graylogHostname?: string,
+  connection?: string,
+  maxChunkSizeWan?: number,
+  maxChunkSizeLan?: number
+  captureRejections?: boolean | undefined;
+}
 
 const defaults = {
   graylogPort: 12201,
@@ -16,15 +23,24 @@ const defaults = {
 
 const GELF_MAGIC_NO = [ 0x1e, 0x0f ]
 
-class Gelf extends EventEmitter {
-  constructor (options) {
+
+export default class Gelf extends EventEmitter {
+
+  config: GelfOptions
+
+  client: {
+    close: () => dgram.Socket
+    send: (...params: any) => void
+  }
+
+  constructor (options?: GelfOptions) {
     super(options)
 
     this.config = options = Object.assign({}, defaults, options)
     this.client = this.openSocket()
 
     this.on('gelf.log', (json = {}, cb = () => {}) => {
-      const msg = this.sanitizeMsg(json)
+      const msg = this.sanitizeMsg(json) || ''
       setImmediate(() => {
         this.sendMessage(msg, cb)
       })
@@ -45,14 +61,14 @@ class Gelf extends EventEmitter {
     this.client.close()
   }
 
-  sendMessage (msg, cb) {
-    this.compress(msg, (_, buf) => {
-      const m = this.maybeChunkMessage(buf)
+  sendMessage (msg: string, cb: any) {
+    this.compress(msg, (_?: string, buf?: Buffer[]) => {
+      const m = this.maybeChunkMessage(buf!)
       this.send(m, cb)
     })
   }
 
-  maybeChunkMessage (buf) {
+  maybeChunkMessage (buf: Buffer[]) {
     const {
       connection,
       maxChunkSizeWan,
@@ -61,20 +77,21 @@ class Gelf extends EventEmitter {
 
     const bufSize = buf.length
 
-    if (connection === 'wan' && bufSize > maxChunkSizeWan) {
-      const chunks = this.getChunks(buf, maxChunkSizeWan)
+    if (connection === 'wan' && bufSize > maxChunkSizeWan!) {
+      const chunks = this.getChunks(buf, maxChunkSizeWan!)
       return this.createPackets(chunks)
     }
 
-    if (connection === 'lan' && bufSize > maxChunkSizeLan) {
-      const chunks = this.getChunks(buf, maxChunkSizeLan)
+    if (connection === 'lan' && bufSize > maxChunkSizeLan!) {
+      const chunks = this.getChunks(buf, maxChunkSizeLan!)
       return this.createPackets(chunks)
     }
 
     return buf
   }
 
-  send (msg, cb = () => {}) {
+  send (msg: Buffer | Buffer[], cb: Function = () => {}) {
+
     const { graylogPort, graylogHostname } = this.config
     const client = this.client
 
@@ -82,14 +99,13 @@ class Gelf extends EventEmitter {
       msg = [ msg ]
     }
 
-    const tasks = msg.map((m) => {
+    const tasks = msg.map((m: Buffer | Buffer[]) => {
       const self = this
-      return function task (cb) {
-        client.send(m, 0, m.length, graylogPort, graylogHostname, (err) => {
+      return (cb: Function = () => {}) => {
+        client.send(m, 0, m.length, graylogPort, graylogHostname, (err: Error) => {
           if (err) {
             return cb(err) && self.emitError(err)
           }
-
           return cb(null)
         })
       }
@@ -101,7 +117,7 @@ class Gelf extends EventEmitter {
     })
   }
 
-  compress (msg, cb = () => {}) {
+  compress (msg: string, cb: Function = () => {}) {
     deflate(msg, (err, buf) => {
       if (err) {
         cb(err)
@@ -112,7 +128,7 @@ class Gelf extends EventEmitter {
     })
   }
 
-  getChunks (buf, chunkSize) {
+  getChunks (buf: Buffer[], chunkSize: number) {
     const res = []
 
     for (let index = 0; index < buf.length; index += chunkSize) {
@@ -124,8 +140,8 @@ class Gelf extends EventEmitter {
     return res
   }
 
-  createPackets (chunks) {
-    const res = []
+  createPackets (chunks: any[]) {
+    const res: Buffer[] = []
     const count = chunks.length
 
     const msgId = Math.floor(
@@ -141,39 +157,44 @@ class Gelf extends EventEmitter {
     return res
   }
 
-  emitError (err) {
+  emitError (err: Error) {
     this.emit('error', err)
   }
 
-  sanitizeMsg (msg) {
-    let json = {}
+  sanitizeMsg (
+    msg:  { [key: string]: any } | string
+  ) {
 
-    json.short_message = msg.short_message
+    const json: {
+      [key: string]: any
+    } = {}
 
     if (typeof msg === 'string') {
       json.short_message = msg
     } else {
-      json = Object.assign({}, json, msg)
+      Object.assign(json, msg)
     }
 
-    if (msg._id) {
-      return this.emitError(new Error('_id is not allowed'))
-    }
+    if (typeof msg === 'object') {
+      if (msg._id) {
+        return this.emitError(new Error('_id is not allowed'))
+      }
 
-    if (!msg.version) {
-      json.version = '1.0'
-    }
+      if (!msg.version) {
+        json.version = '1.0'
+      }
 
-    if (!msg.host) {
-      json.host = os.hostname()
-    }
+      if (!msg.host) {
+        json.host = os.hostname()
+      }
 
-    if (!msg.timestamp) {
-      json.timestamp = new Date().getTime() / 1000
-    }
+      if (!msg.timestamp) {
+        json.timestamp = new Date().getTime() / 1000
+      }
 
-    if (!msg.facility) {
-      json.facility = 'node.js'
+      if (!msg.facility) {
+        json.facility = 'node.js'
+      }
     }
 
     if (!json.short_message) {
@@ -183,5 +204,3 @@ class Gelf extends EventEmitter {
     return JSON.stringify(json)
   }
 }
-
-module.exports = Gelf
