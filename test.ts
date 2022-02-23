@@ -1,4 +1,4 @@
-import Gelf from './gelf'
+import Gelf from './src'
 
 const gelf = new Gelf()
 
